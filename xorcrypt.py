@@ -194,7 +194,18 @@ def do_scan(args):
     blob = open(args.input, "rb").read()
     expect = bytes.fromhex(args.expect) if args.expect else None
     print(f"文件大小: {len(blob)} 字节")
-    print(f"文件开头 8 字节(hex): {blob[:8].hex()}  (加密状态, 一般是乱的)")
+
+    # 先看文件"原样"开头是不是已知格式的魔数。是的话, 它本来就是正常文件, 没加密,
+    # 根本不用还原 —— 避免对着一个好文件瞎解。
+    raw = match_magic(blob, expect)
+    if raw:
+        print(f"文件开头 8 字节(hex): {blob[:8].hex()}  =  {blob[:8].decode('latin1')!r}")
+        print()
+        print(f"⚠️  这个文件开头本身就是 {raw[0]} 的标志 —— 它【没有被加密】, 就是一个正常文件。")
+        print(f"    直接把扩展名改对、双击打开即可, 不需要 recover。")
+        print(f"    (如果它打不开, 那是文件损坏之类的问题, 和这种 XOR 弱加密无关。)")
+        return
+    print(f"文件开头 8 字节(hex): {blob[:8].hex()}  (未识别为已知格式, 可能是被加密/打乱的)")
     print()
 
     # 1) 看正文里"周期性连续匹配"最长有多少。真·全0区会给出很长的连续匹配(几十以上);
