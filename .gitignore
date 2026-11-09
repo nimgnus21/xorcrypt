@@ -1,0 +1,21 @@
+# 测试/运行产生的文件
+*.enc
+*.key
+*.back
+*.back2
+sample.*
+doc.*
+nozero.*
+real_like.*
+head*.bin
+demo_*.bin
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 系统
+.DS_Store
+Thumbs.db
