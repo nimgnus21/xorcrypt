@@ -137,42 +137,52 @@ def _try_one_header(blob, header, keylen):
     return key, plaintext, info, region_len
 
 
-def do_recover(args):
-    blob = open(args.input, "rb").read()
-    expect = bytes.fromhex(args.expect) if args.expect else None
-
-    if args.autohdr:
+def recover_core(blob, keylen, header, autohdr, expect):
+    """
+    还原核心。成功返回 dict(header, key, plaintext, region_start, region_len, hit)，
+    失败返回 (None, 原因字符串)。供命令行 do_recover 和交互菜单共用。
+    """
+    if autohdr:
         # 不确定头部多长时, 挨个试常见值, 以「解密后是否以已知魔数开头」为准。
-        # 只有正确的头部长度才会让正文偏移 0 对齐到真正的文件头, 魔数才对得上。
-        candidates = [args.header, 0, 512, 256, 128, 1024, 2048, 768, 1536]
-        seen, chosen = set(), None
+        candidates = [header, 0, 512, 256, 128, 1024, 2048, 768, 1536]
+        seen = set()
         for h in candidates:
             if h in seen:
                 continue
             seen.add(h)
-            res = _try_one_header(blob, h, args.keylen)
+            res = _try_one_header(blob, h, keylen)
             if res and match_magic(res[1], expect):
-                chosen = (h,) + res
-                break
-        if chosen is None:
-            sys.exit("自动探测失败: 试过的头部长度都没能让正文以已知魔数开头。\n"
-                     "可能原因: 头部长度特殊(手动 --header)、密钥长度不是 256(--keylen)、\n"
-                     "没有>= 密钥长度的连续 0 区, 或此文件不是这种加密方案。\n"
-                     "建议先跑 `scan` 子命令看看情况。")
-        header, key, plaintext, region_start, region_len = chosen
-        hit = match_magic(plaintext, expect)
-        print(f"自动探测: 头部长度 = {header} 字节 (解密后识别为 {hit[0]}, 判定正确)")
+                key, plaintext, region_start, region_len = res
+                return dict(header=h, key=key, plaintext=plaintext,
+                            region_start=region_start, region_len=region_len,
+                            hit=match_magic(plaintext, expect)), None
+        return None, "试过的头部长度都没能让正文以已知魔数开头"
     else:
-        header = args.header
-        res = _try_one_header(blob, header, args.keylen)
+        res = _try_one_header(blob, header, keylen)
         if res is None:
-            sys.exit(f"还原失败: 头部 {header} 字节之后未找到>= {args.keylen} 字节的恒定(全0)区。"
-                     "先跑 `scan` 看看。")
+            return None, f"头部 {header} 字节之后未找到 >= {keylen} 字节的恒定(全0)区"
         key, plaintext, region_start, region_len = res
+        return dict(header=header, key=key, plaintext=plaintext,
+                    region_start=region_start, region_len=region_len,
+                    hit=match_magic(plaintext, expect)), None
+
+
+def do_recover(args):
+    blob = open(args.input, "rb").read()
+    expect = bytes.fromhex(args.expect) if args.expect else None
+
+    r, err = recover_core(blob, args.keylen, args.header, args.autohdr, expect)
+    if r is None:
+        sys.exit(f"还原失败: {err}。\n"
+                 "可能原因: 头部长度特殊(--header)、密钥长度不是 256(--keylen)、\n"
+                 "没有足够长的连续 0 区, 或此文件不是这种加密方案。先跑 `scan` 看看。")
+    header, key, plaintext = r["header"], r["key"], r["plaintext"]
+    region_start, region_len, hit = r["region_start"], r["region_len"], r["hit"]
+    if args.autohdr and hit:
+        print(f"自动探测: 头部长度 = {header} 字节 (解密后识别为 {hit[0]}, 判定正确)")
 
     seg = plaintext[region_start:region_start + region_len]
     zero_ratio = seg.count(0) / len(seg) if seg else 0
-    hit = match_magic(plaintext, expect)
 
     open(args.output, "wb").write(plaintext)
     if args.keyout:
@@ -306,6 +316,48 @@ def _run(fn, **kw):
         print("\n⚠️  出错了：", e)
 
 
+def _menu_recover(inp):
+    """菜单里的「还原」处理，给出清晰、不矛盾的结论。"""
+    try:
+        blob = open(inp, "rb").read()
+    except FileNotFoundError:
+        print("\n⚠️  找不到这个文件，检查路径对不对（可以直接把文件拖进窗口）。")
+        return
+    except Exception as e:
+        print("\n⚠️  打不开这个文件：", e)
+        return
+
+    out = _default_decrypt_output(inp)
+    raw = match_magic(blob)
+
+    # 情况 A：文件开头本来就是正常格式 —— 没被这种 XOR 加密，不用还原
+    if raw:
+        import shutil
+        shutil.copy(inp, out)
+        print(f"\n✅ 已处理完成，文件可用。")
+        print(f"   它开头已经是正常的 {raw[0]} 格式，说明【没有被这种 XOR 方式加密】、不需要还原。")
+        print(f"   已把它(保持原文件名)放到：\n   {out}")
+        print(f"   → 直接双击打开即可。")
+        print(f"   (若它其实打不开，可能只加密了一部分或文件损坏，选【2 诊断】再看看。)")
+        return
+
+    # 情况 B：开头是乱的 —— 尝试无密钥还原
+    print("\n正在尝试还原(无需密钥)...")
+    r, err = recover_core(blob, DEF_KEYLEN, DEF_HEADER, True, None)
+    if r is None:
+        # 情况 C：没解出来
+        print(f"\n⚠️  没能自动还原：{err}。")
+        print(f"   它可能不是这种 XOR 加密方式，或没有足够长的连续 0 区。")
+        print(f"   建议选【2 诊断】看看具体情况。")
+        return
+
+    open(out, "wb").write(r["plaintext"])
+    t = r["hit"][0] if r["hit"] else "未知类型"
+    print(f"\n✅ 解密成功！识别为 {t}。")
+    print(f"   已保存(保持原文件名)到：\n   {out}")
+    print(f"   (头部长度 {r['header']} 字节，还原出 {DEF_KEYLEN} 字节密钥。) → 去打开试试。")
+
+
 def interactive_menu():
     while True:
         print()
@@ -327,25 +379,7 @@ def interactive_menu():
             inp = _ask_path("\n把要还原的文件拖进窗口再回车：\n> ")
             if not inp:
                 continue
-            try:
-                head = open(inp, "rb").read(16)
-            except Exception as e:
-                print("\n⚠️  打不开这个文件：", e)
-                input("\n按回车回菜单...")
-                continue
-            out = _default_decrypt_output(inp)
-            raw = match_magic(head)
-            if raw:
-                # 文件本身就是正常文件，没加密 —— 直接原样复制一份，保持原名
-                import shutil
-                shutil.copy(inp, out)
-                print(f"\nℹ️  这个文件开头已经是 {raw[0]} 的标志，它【没有加密】、本来就是正常文件。")
-                print(f"    已原样复制一份(保持原文件名)到：\n    {out}")
-                print("    直接打开即可。如果原来打不开，多半是下载被拦/打开方式不对，跟加密无关。")
-            else:
-                print(f"\n正在还原，结果将保存到(保持原文件名)：\n  {out}\n")
-                _run(do_recover, input=inp, output=out, keyout=None,
-                     autohdr=True, expect=None, keylen=DEF_KEYLEN, header=DEF_HEADER)
+            _menu_recover(inp)
 
         elif choice == "2":
             inp = _ask_path("\n把要诊断的文件拖进窗口再回车：\n> ")
