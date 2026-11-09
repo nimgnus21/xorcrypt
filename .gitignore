@@ -3,6 +3,7 @@
 *.key
 *.back
 *.back2
+解密结果/
 sample.*
 doc.*
 nozero.*

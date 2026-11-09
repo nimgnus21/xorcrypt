@@ -279,8 +279,107 @@ def do_selftest(args):
     sys.exit(0 if ok else 1)
 
 
+# ------------------------- 交互菜单(双击 / 无参数运行) -------------------------
+def _ask_path(prompt):
+    """读入一个文件路径。支持把文件拖进窗口(会自动去掉首尾引号)。"""
+    return input(prompt).strip().strip('"').strip("'").strip()
+
+
+def _default_decrypt_output(inp):
+    """解密输出默认：保持原文件名，放到同目录下的「解密结果」子文件夹，避免覆盖原文件。"""
+    p = os.path.abspath(inp)
+    outdir = os.path.join(os.path.dirname(p), "解密结果")
+    os.makedirs(outdir, exist_ok=True)
+    return os.path.join(outdir, os.path.basename(p))   # 原文件名
+
+
+def _run(fn, **kw):
+    """调用一个 do_* 函数，并把它的 sys.exit / 异常转成友好提示，不中断菜单。"""
+    try:
+        fn(argparse.Namespace(**kw))
+    except SystemExit as e:
+        if e.code not in (0, None):
+            print("\n⚠️  " + str(e.code))
+    except FileNotFoundError:
+        print("\n⚠️  找不到这个文件，检查路径对不对（可以直接把文件拖进窗口）。")
+    except Exception as e:
+        print("\n⚠️  出错了：", e)
+
+
+def interactive_menu():
+    while True:
+        print()
+        print("=" * 46)
+        print("   xorcrypt  弱加密(重复密钥 XOR)还原工具")
+        print("=" * 46)
+        print("  1. 还原 / 解密文件   (不需要密钥，最常用)")
+        print("  2. 诊断文件          (先看能不能还原)")
+        print("  3. 加密文件          (练习用)")
+        print("  4. 自检")
+        print("  0. 退出")
+        choice = input("\n请输入数字再回车 [默认 1]: ").strip() or "1"
+
+        if choice == "0":
+            print("再见。")
+            return
+
+        elif choice == "1":
+            inp = _ask_path("\n把要还原的文件拖进窗口再回车：\n> ")
+            if not inp:
+                continue
+            try:
+                head = open(inp, "rb").read(16)
+            except Exception as e:
+                print("\n⚠️  打不开这个文件：", e)
+                input("\n按回车回菜单...")
+                continue
+            out = _default_decrypt_output(inp)
+            raw = match_magic(head)
+            if raw:
+                # 文件本身就是正常文件，没加密 —— 直接原样复制一份，保持原名
+                import shutil
+                shutil.copy(inp, out)
+                print(f"\nℹ️  这个文件开头已经是 {raw[0]} 的标志，它【没有加密】、本来就是正常文件。")
+                print(f"    已原样复制一份(保持原文件名)到：\n    {out}")
+                print("    直接打开即可。如果原来打不开，多半是下载被拦/打开方式不对，跟加密无关。")
+            else:
+                print(f"\n正在还原，结果将保存到(保持原文件名)：\n  {out}\n")
+                _run(do_recover, input=inp, output=out, keyout=None,
+                     autohdr=True, expect=None, keylen=DEF_KEYLEN, header=DEF_HEADER)
+
+        elif choice == "2":
+            inp = _ask_path("\n把要诊断的文件拖进窗口再回车：\n> ")
+            if not inp:
+                continue
+            print()
+            _run(do_scan, input=inp, expect=None, keylen=DEF_KEYLEN, header=DEF_HEADER)
+
+        elif choice == "3":
+            inp = _ask_path("\n把要加密的文件拖进窗口再回车：\n> ")
+            if not inp:
+                continue
+            out = inp + ".enc"
+            print()
+            _run(do_encrypt, input=inp, output=out, key=None,
+                 keylen=DEF_KEYLEN, header=DEF_HEADER)
+
+        elif choice == "4":
+            print()
+            _run(do_selftest)
+
+        else:
+            print("没听懂，请输入 0 / 1 / 2 / 3 / 4。")
+            continue
+
+        input("\n按回车回菜单...")
+
+
 # ------------------------- 命令行 -------------------------
 def main():
+    # 无参数(例如双击、或直接 py xorcrypt.py)就进入交互菜单
+    if len(sys.argv) == 1:
+        interactive_menu()
+        return
     ap = argparse.ArgumentParser(description="512 头部 + 重复密钥 XOR 的加密/解密/还原练手工具")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
